@@ -1,31 +1,31 @@
 import json
 import logging
+import os
 import sys
 
 from kafka import KafkaConsumer
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
+from cassandra.io.twistedreactor import TwistedConnection
 from datetime import datetime, timezone
-from iot_data import generate_iot_data
-
 # Kafka Configuration
-KAFKA_BROKER = 'localhost:9092'
-KAFKA_TOPIC = 'iot_data'
+KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:19092')
+KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'iot_data')
 
 # Cassandra Configuration
-CASSANDRA_KEYSPACE = 'iot_data'
-CASSANDRA_TABLE = 'sensor_data'
-CASSANDRA_HOST = 'localhost'
-CASSANDRA_PORT = "9042"
+CASSANDRA_KEYSPACE = os.getenv('CASSANDRA_KEYSPACE', 'iot_data')
+CASSANDRA_TABLE = os.getenv('CASSANDRA_TABLE', 'sensor_data')
+CASSANDRA_HOST = os.getenv('CASSANDRA_HOST', 'localhost')
+CASSANDRA_PORT = int(os.getenv('CASSANDRA_PORT', '19042'))
 
 def create_keyspace(c_conn):
     keyspace_query = """
-    CREATE KEYSPACE IF NOT EXISTS iot_data
-    WITH REPLICATION = {
+    CREATE KEYSPACE IF NOT EXISTS {}
+    WITH REPLICATION = {{
         'class': 'SimpleStrategy',
         'replication_factor': 1
-        };
-    """
+        }};
+    """.format(CASSANDRA_KEYSPACE)
     c_conn.execute(keyspace_query)
 
     print("Keyspace created successfully!")
@@ -33,14 +33,14 @@ def create_keyspace(c_conn):
 
 def create_table(c_conn):
     table_query = """
-    CREATE TABLE IF NOT EXISTS iot_data.sensor_data (
+    CREATE TABLE IF NOT EXISTS {}.{} (
       device_id TEXT,
       timestamp TIMESTAMP,
       temperature DOUBLE,
       humidity DOUBLE,
       PRIMARY KEY (device_id, timestamp)
     );
-    """
+    """.format(CASSANDRA_KEYSPACE, CASSANDRA_TABLE)
     c_conn.execute(table_query)
 
     print("Table created successfully!")
@@ -60,14 +60,14 @@ def insert_data(c_conn, messages):
             temperature = data.get('temperature')
             humidity = data.get('humidity')
     
-            if not all([device_id, timestamp, temperature, humidity]):
+            if any(value is None for value in [device_id, unix_timestamp, temperature, humidity]):
                 raise ValueError("Missing required fields in the data")
 
             insert_query = """
-            INSERT INTO iot_data.sensor_data (
+            INSERT INTO {}.{} (
             device_id, timestamp, temperature, humidity)
             VALUES (%s, %s, %s, %s)
-            """
+            """.format(CASSANDRA_KEYSPACE, CASSANDRA_TABLE)
             c_conn.execute(insert_query, (device_id, timestamp, temperature, humidity))
 
             # Log success
@@ -88,7 +88,12 @@ def cassandra_connection():
     try:
         # Connecting to the cassandra cluster
         auth_provider = PlainTextAuthProvider(username='cassandra', password='cassandra')
-        cluster = Cluster([CASSANDRA_HOST], auth_provider=auth_provider)
+        cluster = Cluster(
+            [CASSANDRA_HOST],
+            port=CASSANDRA_PORT,
+            auth_provider=auth_provider,
+            connection_class=TwistedConnection,
+        )
 
         conn = cluster.connect()
 

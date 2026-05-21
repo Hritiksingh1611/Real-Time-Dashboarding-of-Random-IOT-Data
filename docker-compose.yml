@@ -1,21 +1,22 @@
 services:
   kafka:
     image: confluentinc/cp-kafka:latest
-    hostname: kafka
-    container_name: kafka
+    hostname: rt-kafka
+    container_name: rt-kafka
+    restart: unless-stopped
     ports:
-      - "9092:9092"
-      - "9093:9093"
+      - "19092:19092"
+      - "19093:19093"
     environment:
       KAFKA_KRAFT_MODE: "true"
       KAFKA_PROCESS_ROLES: controller,broker
       KAFKA_NODE_ID: 1
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@rt-kafka:19093"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:19093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://rt-kafka:9092,EXTERNAL://localhost:19092
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -25,15 +26,108 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   cassandra_db:
     image: cassandra:latest
-    hostname: cassandra 
-    container_name: cassandra
+    hostname: rt-cassandra
+    container_name: rt-cassandra
+    restart: unless-stopped
     ports:
-      - "9042:9042"
+      - "19042:9042"
     environment:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=100M
       - CASSANDRA_USERNAME=cassandra
       - CASSANDRA_PASSWORD=cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e \"DESCRIBE KEYSPACES\" > /dev/null 2>&1"]
+      interval: 20s
+      timeout: 15s
+      retries: 12
+      start_period: 50s
+
+  kafka_ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    hostname: rt-kafka-ui
+    container_name: rt-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: realtime-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: rt-kafka:9092
+      KAFKA_CLUSTERS_0_READONLY: "false"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    hostname: rt-dashboard
+    container_name: rt-dashboard
+    depends_on:
+      cassandra_db:
+        condition: service_healthy
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./dashboard.py:/app/dashboard.py:ro
+    environment:
+      CASSANDRA_HOST: rt-cassandra
+      CASSANDRA_PORT: 9042
+      CASSANDRA_KEYSPACE: iot_data
+      CASSANDRA_TABLE: sensor_data
+    ports:
+      - "18501:8501"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health').read()\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  producer:
+    image: python:3.11-slim
+    hostname: rt-producer
+    container_name: rt-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -lc "pip install --no-cache-dir kafka-python &&
+      python -u iot_data.py"
+    environment:
+      KAFKA_BROKER: rt-kafka:9092
+
+  consumer:
+    image: python:3.11-slim
+    hostname: rt-consumer
+    container_name: rt-consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cassandra_db:
+        condition: service_healthy
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -lc "pip install --no-cache-dir kafka-python cassandra-driver twisted service_identity &&
+      python -u stream_iot_data.py"
+    environment:
+      KAFKA_BROKER: rt-kafka:9092
+      CASSANDRA_HOST: rt-cassandra
+      CASSANDRA_PORT: 9042
